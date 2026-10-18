@@ -1,61 +1,96 @@
-# Demo Devices Template
+# TechnoVE for Gladys
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+Shows your **TechnoVE** EV charging station (Quebec-made i-Series,
+s-Series) in Gladys through its **local API**: no cloud, no account,
+straight on your network.
+
+> **Unofficial API, never tested with a real station.** Not affiliated with TechnoVE.
+> The integration talks to the local API of the station like the
+> python-technove library (used by Home Assistant). TechnoVE may change it
+> without notice.
 
 ## What you get
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+One device per station with:
 
-## Configuration
+| Feature                  | Content                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| Status                   | Unplugged, Plugged in waiting, Charging, faults, outside the activation period, high tariff |
+| Connector                | Available, occupied, faulted or unavailable (Gladys "charging station" category)            |
+| Charging state           | Charging, vehicle connected, paused (charging not allowed), idle                            |
+| Power (estimated)        | In W: current × output voltage (the station gives no power)                                 |
+| Current                  | In A                                                                                        |
+| Input and output voltage | In V                                                                                        |
+| Energy of the session    | In kWh, a plain sensor                                                                      |
+| Maximum current          | In A, the current setting of the station                                                    |
+| Charging allowed         | Yes / no                                                                                    |
+| Automatic charging       | Yes / no (set in the TechnoVE app)                                                          |
+| Load sharing             | Yes / no, and "load sharing conflict": read only                                            |
+| Start charging           | Button (commands allowed only)                                                              |
+| Stop charging            | Button (commands allowed only)                                                              |
+| Set the maximum current  | List from 8 A to the rating of the station (commands allowed only)                          |
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+Read every 30 seconds by default (10 s to 10 min, configurable).
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+**Energy**: the energy of the session is a **plain sensor**, never an index:
+it does not enter the Energy tab of Gladys (the station is already counted by
+your main meter). No daily consumption is published.
 
-## Actions
+## Installation
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+1. Give the station a **fixed IP address** in your router.
+2. Install the integration from the Gladys store.
+3. In its configuration, enter the **IP address of the station** (several
+   stations in load sharing: separated by commas, four at most).
+4. Save, then add the station from the **Discovery** tab.
 
-## Scenes
+The **Test the connection** button reads each station once (at most every
+10 seconds). The local API has no password: any machine of your network can
+read it, Gladys included.
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+## Commands (off by default)
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+"Start charging", "Stop charging" and "Set the maximum current" refuse
+every command while **Allow the commands** is off. On:
 
-## Dashboard
+- **Start** allows the charge (the vehicle charges as soon as it asks);
+  refused when the station reports a fault or an unknown state;
+- **Stop** forbids the charge;
+- **Maximum current**: from 8 A to the rating the station reports
+  (`maxStationCurrent`), in whole amperes.
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+Start and stop are refused while **automatic charging** is on (a setting of
+the TechnoVE app); the maximum current is refused in **load sharing** (the
+sharing sets it).
 
-## Troubleshooting
+They are **buttons** and a **list**, never switches: a "turn everything
+off" (from Gladys, Google Home, Alexa or HomeKit) never reaches them. A scene can trigger them, only through an explicit action, and only when the
+commands are allowed.
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+Before each command, the integration **reads the station again** and decides
+on that read only; the option is checked again right before sending. A
+command with nothing to do (already so) is not sent. A command that cannot
+leave within 3.5 seconds is refused unsent. When the station does not
+confirm (silence, a 5xx error), Gladys shows "Command sent, without
+confirmation": check the state, read again 5 then 20 seconds later. One
+command at a time per station.
+
+## Errors and limits
+
+- **Station unreachable**: the connector turns "unavailable", the status
+  "Station unreachable"; the other values keep their last value. New try
+  after 30 s, 1, 2, then 5 minutes, never faster than the interval.
+- **429 (too many requests)**, unlikely on a local station: a pause of 1
+  minute to 6 hours for everything (reads, button, commands), kept in `/data`
+  across a restart.
+- The **power is estimated** (current × voltage): the station does not give
+  it.
+- Neither the schedule (off-peak / high tariff), nor the automatic charge,
+  nor the maximum charge percentage can be changed from Gladys.
+- The logs never hold the text of the station's answers.
+
+## Credits
+
+Port of [python-technove](https://github.com/Moustachauve/pytechnove)
+(Christophe Gagnier, MIT, version 2.1.3), whose request code is based on
+python-wled (Franck Nijhof, MIT). Apache-2.0 license.
