@@ -71,7 +71,9 @@ export function fakeStations(stations = { [HOST]: { info: info() } }) {
         throw new StationError(ERROR_KINDS.UNREACHABLE, 'Unreachable: ECONNREFUSED');
       }
       const isRead = path === '/station/get/info';
-      const delay = isRead ? station.readDelay : station.commandDelay;
+      const delay = isRead
+        ? station.readDelay
+        : (station.pathDelays?.[path] ?? station.commandDelay);
       if (station.silent || (delay ?? 0) >= timeoutMs) {
         await wait(timeoutMs);
         throw new StationError(ERROR_KINDS.TIMEOUT, 'Connected but silent: timeout');

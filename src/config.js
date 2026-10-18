@@ -67,11 +67,13 @@ export function normalizeConfig(raw = {}) {
     .filter((e) => e !== '')) {
     const address = parseAddress(entry);
     if (!address) {
-      invalid.push(entry.slice(0, 100));
-    } else if (
-      !addresses.some((a) => addressKey(a) === addressKey(address)) &&
-      addresses.length < LIMITS.addresses
-    ) {
+      invalid.push({ text: entry.slice(0, 100), reason: 'invalid' });
+    } else if (addresses.some((a) => addressKey(a) === addressKey(address))) {
+      // The same address twice: read once.
+    } else if (addresses.length >= LIMITS.addresses) {
+      // Never dropped silently: shown with its reason, "four at most".
+      invalid.push({ text: addressKey(address), reason: 'too_many' });
+    } else {
       addresses.push(address);
     }
   }

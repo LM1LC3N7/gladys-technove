@@ -4,8 +4,8 @@ Affiche votre borne de recharge **TechnoVE** (bornes québécoises i-Series,
 s-Series) dans Gladys, par son **API locale** : sans cloud, sans compte,
 directement sur votre réseau.
 
-> **API non officielle, module jamais testé avec une vraie borne.** Sans lien avec TechnoVE.
-> Il parle à l'API locale de la borne comme la bibliothèque python-technove
+> **API non officielle, module jamais testé avec une vraie borne.**
+> Sans lien avec TechnoVE. Il parle à l'API locale de la borne comme la bibliothèque python-technove
 > (utilisée par Home Assistant). TechnoVE peut la changer sans prévenir.
 
 ## Ce que vous obtenez
@@ -67,7 +67,9 @@ Démarrer et arrêter sont refusés quand la **charge automatique** est activée
 Ce sont des **boutons** et une **liste**, jamais des interrupteurs : un
 « éteins tout » (depuis Gladys, Google Home, Alexa ou HomeKit) ne les touche
 pas. Une scène peut les déclencher, mais seulement par une action
-explicite, et seulement si les commandes sont autorisées.
+explicite, et seulement si les commandes sont autorisées. Attention : le
+chat IA de Gladys (MCP) peut créer et lancer une telle scène : tant que les
+commandes sont autorisées, il peut démarrer ou arrêter la charge.
 
 Avant chaque commande, l'intégration **relit la borne** et décide sur cette
 lecture seule ; l'option est revérifiée juste avant l'envoi. Une commande
@@ -75,19 +77,26 @@ inutile (déjà dans cet état) n'est pas envoyée. Une commande qui ne peut pas
 partir dans les 3,5 secondes est refusée sans être envoyée. Si la borne ne
 confirme pas (silence, erreur 5xx), Gladys affiche « Commande envoyée, sans
 confirmation » : vérifiez l'état, relu 5 puis 20 secondes plus tard. Une
-commande à la fois par borne.
+commande à la fois par borne : une autre est refusée tout de suite, sauf un
+**arrêt**, jamais bloqué : il attend la commande en cours au plus le temps
+de son échéance, puis part ; il est renvoyé une fois quand elle se termine,
+et un démarrage pas encore parti s'efface devant lui.
 
 ## Erreurs et limites
 
-- **Borne injoignable** : le connecteur passe à « indisponible », l'état à
-  « Borne injoignable » ; les autres valeurs gardent leur dernière valeur.
-  Nouvel essai après 30 s, 1, 2 puis 5 minutes, jamais plus vite que
-  l'intervalle.
+- **Borne injoignable** : seuls le connecteur (« indisponible ») et l'état
+  (« Borne injoignable ») changent ; la puissance, le courant, l'état de
+  charge et les autres valeurs gardent leur dernière valeur (un « en
+  charge » peut rester affiché : regardez l'état). Une borne retirée de la
+  configuration, ou qui n'a jamais répondu depuis le démarrage, s'affiche de
+  même sur son appareil, et l'écran de configuration la nomme. Nouvel essai
+  après 30 s, 1, 2 puis 5 minutes, jamais plus vite que l'intervalle.
 - **429 (trop de requêtes)**, peu probable sur une borne locale : pause de
-  1 minute à 6 heures pour tout (lectures, bouton, commandes), gardée dans
-  `/data` après un redémarrage.
-- La **puissance est estimée** (courant × tension) : la borne ne la donne
-  pas.
+  1 minute à 6 heures pour tout (lectures, bouton, commandes), jamais plus
+  courte que l'intervalle de rafraîchissement, gardée dans `/data` après un
+  redémarrage.
+- La **puissance est estimée** (courant × tension, facteur de puissance
+  supposé 1) : la borne ne la donne pas.
 - Ni la planification (heures creuses / tarif élevé), ni la charge
   automatique, ni le pourcentage de charge maximal ne se changent depuis
   Gladys.

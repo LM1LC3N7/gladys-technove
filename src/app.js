@@ -34,9 +34,6 @@ import { fileStore, normalizeMemory } from './store.js';
 import { COMMANDS, TechnoveClient, errorReason } from './technove/client.js';
 import { ERROR_KINDS } from './technove/http.js';
 
-/** Command errors after which the request may have reached the station. */
-const MAYBE_SENT = new Set([ERROR_KINDS.TIMEOUT, ERROR_KINDS.PROTOCOL]);
-
 const both = (en, fr) => ({ en, fr });
 const join = (a, b) => both(`${a.en} ${b.en}`, `${a.fr} ${b.fr}`);
 
@@ -67,8 +64,8 @@ export class TechnoveApp {
     this.published = undefined;
     this.badge = undefined;
     this.lastTestAt = -Infinity;
-    /** mac -> the tail of its command chain (one command at a time per station). */
-    this.chains = new Map();
+    /** mac -> the command in flight: { role, overtaken, promise } (one at a time, a stop aside). */
+    this.inFlight = new Map();
     /** `${mac}:${kind}` -> { from, expected, moved, until }: a command sent, not seen yet. */
     this.guards = new Map();
   }
@@ -102,9 +99,11 @@ export class TechnoveApp {
     );
     this.published = undefined;
     this.badge = undefined;
+    this.lastStatus = undefined;
     this.publisher.start();
     if (this.stations.size === 0) {
-      await this.updateStatus();
+      // The devices already created are shown unreachable.
+      await this.publishAll();
       return;
     }
     await this.setStatus(false, this.withInvalid(this.pauseMessage() ?? T.connecting));
@@ -204,11 +203,14 @@ export class TechnoveApp {
     return this.now() < this.pausedUntil;
   }
 
-  /** The next read of a station: after the pause, after its backoff, else the interval. */
+  /**
+   * The next read of a station: after the pause (never sooner than the
+   * interval), after its backoff, else the interval.
+   */
   schedule(station, delay) {
     this.clearTimer(station);
     const wait = this.paused
-      ? this.pausedUntil - this.now()
+      ? Math.max(this.pausedUntil - this.now(), this.interval)
       : (delay ?? (station.online === false ? station.wait : this.interval));
     const generation = this.generation;
     station.timer = this.timers.setTimeout(
@@ -235,6 +237,7 @@ export class TechnoveApp {
   async run(station) {
     const generation = this.generation;
     if (this.paused) {
+      await this.updateStatus();
       this.schedule(station);
       return;
     }
@@ -322,59 +325,102 @@ export class TechnoveApp {
 
   /** The connection status of the configuration screen, from every station. */
   async updateStatus() {
+    const [connected, message] = this.status();
+    const orphans = this.orphans();
+    if (orphans.length === 0) {
+      await this.setStatus(connected, message);
+      return;
+    }
+    const names = orphans
+      .map((mac) => {
+        const device = (this.gladys.devices ?? []).find(
+          (d) => d.external_id === stationIds(this.gladys, mac).device,
+        );
+        return typeof device?.name === 'string' && device.name !== ''
+          ? `${device.name.slice(0, 60)} (${mac})`
+          : mac;
+      })
+      .join(', ');
+    await this.setStatus(false, join(message, T.orphans(names)));
+  }
+
+  /** `[connected, message]` from the configured stations. */
+  status() {
     const stations = [...this.stations.values()];
     if (stations.length === 0) {
-      await this.setStatus(
+      return [
         false,
         this.config.invalid.length > 0
           ? join(T.noAddress, T.invalid(this.config.invalid))
           : T.noAddress,
-      );
-      return;
+      ];
     }
     const pause = this.pauseMessage();
-    const readOnce = stations.some((s) => s.snapshot);
     if (pause) {
-      await this.setStatus(readOnce, this.withInvalid(pause));
-      return;
+      return [stations.some((s) => s.snapshot), this.withInvalid(pause)];
     }
     const down = stations.filter((s) => s.online === false);
     if (down.length > 0) {
       const wait = Math.min(...down.map((s) => s.wait ?? this.interval));
-      await this.setStatus(
-        false,
-        this.withInvalid(T.unreachable(down.map((s) => s.key).join(', '), age(wait))),
-      );
-      return;
+      return [false, this.withInvalid(T.unreachable(down.map((s) => s.key).join(', '), age(wait)))];
     }
     if (stations.some((s) => s.online === undefined)) {
-      await this.setStatus(false, this.withInvalid(T.connecting));
-      return;
+      return [false, this.withInvalid(T.connecting)];
     }
     if (stations.some((s) => s.error === 'no_id')) {
-      await this.setStatus(false, this.withInvalid(T.noId));
-      return;
+      return [false, this.withInvalid(T.noId)];
     }
     const summaries = stations.map((s) => this.summary(s));
     const summary = both(
       summaries.map((m) => m.en).join(' '),
       summaries.map((m) => m.fr).join(' '),
     );
-    await this.setStatus(true, this.withInvalid(T.connected(summary)));
+    return [true, this.withInvalid(T.connected(summary))];
   }
 
   // --- Gladys ----------------------------------------------------------------
 
-  /** The stations read with a valid MAC, one per MAC (the first address wins). */
+  /**
+   * The stations read with a valid MAC, one per MAC: an address online wins
+   * over one that stopped answering, else the first address.
+   */
   known() {
     const byMac = new Map();
     for (const station of this.stations.values()) {
       const mac = station.snapshot?.mac;
-      if (mac && !byMac.has(mac)) {
+      if (!mac) {
+        continue;
+      }
+      const held = byMac.get(mac);
+      if (!held || (held.online === false && station.online !== false)) {
         byMac.set(mac, station);
       }
     }
     return byMac;
+  }
+
+  /**
+   * The MACs of the devices created in Gladys that no station read gives
+   * (an address removed, or a station that never answered since the start).
+   * Empty while a first read is still under way.
+   */
+  orphans() {
+    if ([...this.stations.values()].some((s) => s.online === undefined)) {
+      return [];
+    }
+    const known = this.known();
+    const macs = [];
+    for (const device of this.gladys.devices ?? []) {
+      const match = /:technove:([0-9a-f]{12})$/.exec(String(device?.external_id ?? ''));
+      if (
+        match &&
+        !known.has(match[1]) &&
+        stationIds(this.gladys, match[1]).device === device.external_id
+      ) {
+        macs.push(match[1]);
+      }
+    }
+    return macs;
   }
 
   stationOf(mac) {
@@ -432,6 +478,22 @@ export class TechnoveApp {
         }
       }
     }
+    // A created device no station gives: unreachable, never left "charging".
+    for (const mac of this.orphans()) {
+      const states = deviceStates(
+        stationIds(this.gladys, mac),
+        {},
+        {
+          online: false,
+          language: this.config.language,
+        },
+      );
+      for (const { device_feature_external_id: id, ...value } of states) {
+        if (created.has(id)) {
+          this.publisher.push(id, value);
+        }
+      }
+    }
   }
 
   async publishBadge() {
@@ -446,6 +508,12 @@ export class TechnoveApp {
             station.online === false ? DEVICE_TRANSPORTS.UNREACHABLE : DEVICE_TRANSPORTS.LOCAL,
         });
       }
+    }
+    for (const mac of this.orphans()) {
+      entries.push({
+        external_id: stationIds(this.gladys, mac).device,
+        transport: DEVICE_TRANSPORTS.UNREACHABLE,
+      });
     }
     const json = JSON.stringify(entries);
     if (entries.length === 0 || json === this.badge) {
@@ -549,25 +617,58 @@ export class TechnoveApp {
     if (!this.config.allowCommands) {
       throw this.refusal(ERRORS.disabled);
     }
-    return this.serialized(target.mac, () => this.command(target, wanted, received));
+    const { mac, role } = target;
+    // One command at a time per station: a busy station refuses at once.
+    // A stop is never blocked by the queue: it waits for the command in
+    // flight only as long as its own deadline allows, then goes anyway.
+    const previous = this.inFlight.get(mac);
+    if (previous && (role !== FEATURES.STOP || previous.role === FEATURES.STOP)) {
+      throw this.refusal(ERRORS.stillRunning);
+    }
+    const entry = { role, overtaken: undefined, promise: undefined };
+    this.inFlight.set(mac, entry);
+    entry.promise = (async () => {
+      if (previous) {
+        const limit =
+          received +
+          TIMINGS.commandSendBy -
+          TIMINGS.commandMinSend -
+          TIMINGS.commandMinRead -
+          this.now();
+        const settled = await this.within(previous.promise, limit);
+        if (!settled) {
+          // Still in flight: the stop goes now, and again once it settles.
+          entry.overtaken = previous.promise;
+        }
+      }
+      return this.command(target, wanted, received, entry);
+    })();
+    try {
+      return await entry.promise;
+    } finally {
+      if (this.inFlight.get(mac) === entry) {
+        this.inFlight.delete(mac);
+      }
+    }
   }
 
-  /** Runs `task` after the previous command of the same station. */
-  serialized(mac, task) {
-    const previous = this.chains.get(mac) ?? Promise.resolve();
-    const run = previous.catch(() => {}).then(task);
-    const tail = run.catch(() => {});
-    this.chains.set(mac, tail);
-    tail.then(() => {
-      if (this.chains.get(mac) === tail) {
-        this.chains.delete(mac);
-      }
+  /** Whether `promise` settles within `ms` (it goes on either way). */
+  within(promise, ms) {
+    let handle;
+    const timeout = new Promise((resolve) => {
+      handle = this.timers.setTimeout(() => resolve(false), Math.max(0, ms));
     });
-    return run;
+    return Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      timeout,
+    ]).finally(() => this.timers.clearTimeout(handle));
   }
 
   /** What to send, from the station just read; undefined when it is already so. */
-  plan(role, wanted, s, mac) {
+  plan(role, wanted, s, mac, entry = {}) {
     if (role === FEATURES.START || role === FEATURES.STOP) {
       if (s.autoCharge === undefined || s.sessionActive === undefined) {
         throw this.refusal(ERRORS.missing);
@@ -575,7 +676,8 @@ export class TechnoveApp {
       if (s.autoCharge) {
         throw this.refusal(ERRORS.autoCharge);
       }
-      const pending = this.guardActive(mac, 'session');
+      // A command still in flight is pending too: never "already stopped" over it.
+      const pending = this.guardActive(mac, 'session') || Boolean(entry.overtaken);
       if (role === FEATURES.START) {
         if (FAULTS.has(s.status)) {
           throw this.refusal(ERRORS.fault(STATUS_NAMES[s.status]));
@@ -633,7 +735,12 @@ export class TechnoveApp {
     }
   }
 
-  async command({ mac, role }, wanted, received) {
+  /** A stop arrived for this station after `entry` started: anything but a stop gives way. */
+  stopArrived(mac, entry) {
+    return entry.role !== FEATURES.STOP && this.inFlight.get(mac) !== entry;
+  }
+
+  async command({ mac, role }, wanted, received, entry = {}) {
     const generation = this.generation;
     const sendBy = received + TIMINGS.commandSendBy;
     this.checkBeforeSend(generation, mac);
@@ -660,6 +767,9 @@ export class TechnoveApp {
     if (generation !== this.generation) {
       throw this.refusal(ERRORS.unknownStation);
     }
+    if (fresh.mac === undefined) {
+      throw this.refusal(ERRORS.missing);
+    }
     if (fresh.mac !== mac) {
       throw this.refusal(ERRORS.otherStation);
     }
@@ -667,12 +777,15 @@ export class TechnoveApp {
     // Shown in the background: the ack never waits for Gladys.
     this.publishAll().catch((err) => this.logger.warn(`Publishing failed: ${err.message}`));
 
-    const plan = this.plan(role, wanted, fresh, mac);
+    const plan = this.plan(role, wanted, fresh, mac, entry);
     if (!plan) {
       return;
     }
     // The option may have been turned off during the read: checked again.
     this.checkBeforeSend(generation, mac);
+    if (this.stopArrived(mac, entry)) {
+      throw this.refusal(ERRORS.stopMeanwhile);
+    }
     if (this.now() > sendBy) {
       throw this.refusal(ERRORS.tooSlow);
     }
@@ -692,7 +805,8 @@ export class TechnoveApp {
       if (err.kind === ERROR_KINDS.LATE) {
         throw this.refusal(ERRORS.tooSlow);
       }
-      if (err.kind === ERROR_KINDS.UNREACHABLE) {
+      if (err.kind === ERROR_KINDS.UNREACHABLE || err.notSent) {
+        // Nothing accepted the connection, or the error came before the transport.
         throw this.refusal(ERRORS.notSent(reason));
       }
       if (err.kind === ERROR_KINDS.RATE_LIMITED) {
@@ -704,16 +818,44 @@ export class TechnoveApp {
         this.followUp(station);
         throw this.refusal(ERRORS.refused(reason));
       }
-      if (err.kind === ERROR_KINDS.HTTP || MAYBE_SENT.has(err.kind)) {
-        // It may have reached the station: the state may change anyway.
-        this.guard(mac, plan);
-        this.followUp(station);
-        throw this.refusal(ERRORS.sentUnconfirmed(reason));
-      }
+      // A 5xx, a silence, a broken answer or any other error after the
+      // transport started: it may have reached the station.
+      this.guard(mac, plan);
+      this.followUp(station);
+      this.stopAgain(station, mac, entry, plan);
       throw this.refusal(ERRORS.sentUnconfirmed(reason));
     }
     this.guard(mac, plan);
     this.followUp(station);
+    this.stopAgain(station, mac, entry, plan);
+  }
+
+  /**
+   * A stop that overtook a command still in flight (a start may land after
+   * it): sent once more when that command settles. Same endpoint, no state
+   * read: it repeats a stop already decided.
+   */
+  stopAgain(station, mac, entry, plan) {
+    if (!entry.overtaken || plan.command !== COMMANDS.STOP) {
+      return;
+    }
+    const generation = this.generation;
+    entry.overtaken
+      .catch(() => {})
+      .then(async () => {
+        if (generation !== this.generation || !this.config.allowCommands) {
+          return;
+        }
+        this.logger.warn(`TechnoVE ${station.key}: stop sent again after the command in flight`);
+        await this.client.command(station.address, COMMANDS.STOP, {
+          startBy: Infinity,
+          timeoutMs: TIMINGS.readTimeout,
+        });
+        this.guard(mac, plan);
+      })
+      .catch((err) =>
+        this.logger.warn(`TechnoVE ${station.key}: stop again failed (${errorReason(err)})`),
+      );
   }
 
   /** Spaced reads after a command: its effect, then a check. */

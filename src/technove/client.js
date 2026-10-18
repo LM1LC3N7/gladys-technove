@@ -166,7 +166,7 @@ export class TechnoveClient {
         body: JSON.stringify({ ' stationNumber': 1, current }),
       };
     } else {
-      throw new Error(`Unknown command ${command}`);
+      throw Object.assign(new Error(`Unknown command ${command}`), { notSent: true });
     }
     if (this.now() > startBy) {
       throw new StationError(ERROR_KINDS.LATE, 'Too late to send');

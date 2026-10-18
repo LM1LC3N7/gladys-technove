@@ -26,6 +26,8 @@ export const PATHS = {
 export const CURRENT = {
   min: 8,
   ratingMax: 80,
+  /** The select of a station whose rating is unknown stops at 32 A. */
+  unknownRatingMax: 32,
 };
 
 /**

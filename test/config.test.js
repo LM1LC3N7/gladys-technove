@@ -20,7 +20,11 @@ test('addresses: IPv4 or host names, a pasted URL reduced, four at most', () => 
     config.addresses.map((a) => a.host),
     ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4'],
   );
-  assert.deepEqual(config.invalid, ['a_b']);
+  // The fifth address is never dropped silently: "four at most".
+  assert.deepEqual(config.invalid, [
+    { text: '10.0.0.5', reason: 'too_many' },
+    { text: 'a_b', reason: 'invalid' },
+  ]);
 });
 
 test('the commands are allowed by true only', () => {

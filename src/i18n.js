@@ -71,10 +71,22 @@ export const T = {
     'Enter the IP address of your TechnoVE station, then save.',
     "Saisissez l'adresse IP de votre borne TechnoVE, puis enregistrez.",
   ),
-  invalid: (entries) =>
+  /** `entries`: `{ text, reason: 'invalid' | 'too_many' }` from normalizeConfig. */
+  invalid: (entries) => {
+    const list = (language) =>
+      entries
+        .map(({ text, reason }) =>
+          reason === 'too_many'
+            ? `${text} (${language === 'en' ? 'four at most' : 'quatre au plus'})`
+            : text,
+        )
+        .join(', ');
+    return both(`Address ignored: ${list('en')}.`, `Adresse ignorée : ${list('fr')}.`);
+  },
+  orphans: (names) =>
     both(
-      `Address not understood, ignored: ${entries.join(', ')}.`,
-      `Adresse non comprise, ignorée : ${entries.join(', ')}.`,
+      `Not read any more: ${names} (address removed or not answering).`,
+      `Plus lue : ${names} (adresse retirée ou sans réponse).`,
     ),
   connecting: both('Reading the station…', 'Lecture de la borne…'),
   connected: (summary) => both(`Connected. ${summary.en}`, `Connecté. ${summary.fr}`),
@@ -138,6 +150,10 @@ export const ERRORS = {
   stillRunning: both(
     'Another command of this station is still running: not sent.',
     'Une autre commande de cette borne est encore en cours : non envoyée.',
+  ),
+  stopMeanwhile: both(
+    'A stop of this station arrived meanwhile: this command is not sent.',
+    "Un arrêt de cette borne est arrivé entre-temps : cette commande n'est pas envoyée.",
   ),
   tooSlow: both(
     'The station answered too slowly to send the command in time: not sent.',

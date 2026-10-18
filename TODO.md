@@ -135,6 +135,38 @@ up to date at the end of every milestone.
 - **Reconnection to Gladys** (`connected`): republishes status, devices,
   states and badge (the core keeps them in memory); never clears the pause;
   a changed address list or interval restarts the stations.
+- **Review round 1 (2026-10-18)**:
+  - a 429 pause waits `max(end of the pause, interval)`: never a read
+    sooner than the interval (test: Retry-After 60 s, interval 600 s);
+  - a device created in Gladys whose MAC no configured station gives (address
+    removed, or no answer since the start; not while a first read is under
+    way) gets the offline states (status "Station unreachable", connector
+    UNAVAILABLE), an unreachable badge, and the status names it (connected
+    false);
+  - one command at a time per station, refused at once (`stillRunning`)
+    while one runs — except a stop: it waits for the command in flight at
+    most until its own deadline leaves room to read and send (3.5 s − 0.6 s
+    after its arrival), then goes; a stop that overtook a command still in
+    flight is "pending" (never "already stopped") and is sent once more,
+    without a read, when that command settles; a start or a current that
+    reaches its send point after a stop arrived is refused unsent
+    (`stopMeanwhile`);
+  - an unclassified command error after the transport started follows the
+    "maybe sent" path (guard, follow-up reads, "sent, without confirmation");
+    an error flagged `notSent` (raised before the transport) is "not sent";
+  - `known()`: for one MAC on several addresses, an address online wins over
+    one that stopped answering, else the first;
+  - an unknown rating: the select stops at 32 A (the command is refused
+    anyway, `unknownBounds`);
+  - a fresh read without a MAC refuses the command (`missing`);
+  - a numeric state outside the `min`/`max` of its feature is dropped;
+  - a fifth address (and beyond) goes to `invalid` with the reason "four at
+    most";
+  - `start()` clears the status cache (`lastStatus`);
+  - docs: the AI chat (MCP) can create and run a scene that starts or stops
+    the charge while the commands are allowed; when unreachable, power,
+    current and charging state keep their last value; power factor assumed
+    to be 1.
 - **gladys_version >= 5.1.0** (as the sibling local modules); **category
   `energy`**, transport `local`.
 - **Not checked here (PIPELINE step 1, main session)**: duplicates in the

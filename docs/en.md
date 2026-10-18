@@ -4,8 +4,8 @@ Shows your **TechnoVE** EV charging station (Quebec-made i-Series,
 s-Series) in Gladys through its **local API**: no cloud, no account,
 straight on your network.
 
-> **Unofficial API, never tested with a real station.** Not affiliated with TechnoVE.
-> The integration talks to the local API of the station like the
+> **Unofficial API, never tested with a real station.**
+> Not affiliated with TechnoVE. The integration talks to the local API of the station like the
 > python-technove library (used by Home Assistant). TechnoVE may change it
 > without notice.
 
@@ -64,8 +64,11 @@ the TechnoVE app); the maximum current is refused in **load sharing** (the
 sharing sets it).
 
 They are **buttons** and a **list**, never switches: a "turn everything
-off" (from Gladys, Google Home, Alexa or HomeKit) never reaches them. A scene can trigger them, only through an explicit action, and only when the
-commands are allowed.
+off" (from Gladys, Google Home, Alexa or HomeKit) never reaches them. A
+scene can trigger them, only through an explicit action, and only when the
+commands are allowed. Note that the AI chat of Gladys (MCP) can create and
+run such a scene: while the commands are allowed, it can start or stop the
+charge.
 
 Before each command, the integration **reads the station again** and decides
 on that read only; the option is checked again right before sending. A
@@ -73,18 +76,25 @@ command with nothing to do (already so) is not sent. A command that cannot
 leave within 3.5 seconds is refused unsent. When the station does not
 confirm (silence, a 5xx error), Gladys shows "Command sent, without
 confirmation": check the state, read again 5 then 20 seconds later. One
-command at a time per station.
+command at a time per station: another one is refused at once, except a
+**stop**, never blocked: it waits for the command in flight only as long as
+its own deadline allows, then goes; it is sent once more when that command
+ends, and a start not sent yet gives way to it.
 
 ## Errors and limits
 
-- **Station unreachable**: the connector turns "unavailable", the status
-  "Station unreachable"; the other values keep their last value. New try
-  after 30 s, 1, 2, then 5 minutes, never faster than the interval.
+- **Station unreachable**: only the connector ("unavailable") and the
+  status ("Station unreachable") change; the power, the current, the
+  charging state and the other values keep their last value (a "charging"
+  may stay shown: check the status). A station removed from the
+  configuration, or that never answered since the start, shows the same on
+  its device, and the configuration screen names it. New try after 30 s,
+  1, 2, then 5 minutes, never faster than the interval.
 - **429 (too many requests)**, unlikely on a local station: a pause of 1
-  minute to 6 hours for everything (reads, button, commands), kept in `/data`
-  across a restart.
-- The **power is estimated** (current × voltage): the station does not give
-  it.
+  minute to 6 hours for everything (reads, button, commands), never shorter
+  than the refresh interval, kept in `/data` across a restart.
+- The **power is estimated** (current × voltage, power factor assumed to be
+  1): the station does not give it.
 - Neither the schedule (off-peak / high tariff), nor the automatic charge,
   nor the maximum charge percentage can be changed from Gladys.
 - The logs never hold the text of the station's answers.

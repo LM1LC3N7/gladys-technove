@@ -154,8 +154,12 @@ export function parseFeatureId(externalId) {
   return match && ROLES.includes(match[2]) ? { mac: match[1], role: match[2] } : undefined;
 }
 
-/** The highest current the select offers: the rating of the station, else 80 A. */
-export const currentCeiling = (station) => station.maxStationCurrent ?? CURRENT.ratingMax;
+/**
+ * The highest current the select offers: the rating of the station, else
+ * 32 A (an unknown rating never offers more; the command is refused anyway
+ * until the station gives its rating).
+ */
+export const currentCeiling = (station) => station.maxStationCurrent ?? CURRENT.unknownRatingMax;
 
 export function currentOptions(ceiling) {
   const options = [];
@@ -270,8 +274,10 @@ export function deviceStates(ids, station, { online, language }) {
     ].map(({ role, ...value }) => ({ device_feature_external_id: ids.feature(role), ...value }));
   }
   const states = [];
+  // A value outside the bounds of its feature is dropped (Gladys keeps the last one).
   const add = (role, state) => {
-    if (state !== undefined && Number.isFinite(state)) {
+    const { min, max } = DEFINITIONS[role];
+    if (state !== undefined && Number.isFinite(state) && state >= min && state <= max) {
       states.push({ role, state });
     }
   };

@@ -464,27 +464,211 @@ test('a guard: a command not shown yet is never answered "already so"', async (t
   assert.equal(sent(server).length, 3, 'deduped once the guard is gone');
 });
 
-test('commands of one station run one at a time', async (t) => {
+/** Sends `role` at once (no clock move), for the concurrency tests. */
+const send = (gladys, role, value = 1) => {
+  const device = gladys.fake.devices[0];
+  return gladys.fake.setValue(
+    device,
+    device.features.find((f) => f.external_id === feature(role)),
+    value,
+  );
+};
+const run = async (t, ms, step = 100) => {
+  for (let elapsed = 0; elapsed < ms; elapsed += step) {
+    t.mock.timers.tick(step);
+    await settle();
+  }
+};
+
+test('a busy station refuses another command at once', async (t) => {
   const { gladys, server, station } = await setup(t, { config: ALLOWED });
   station.info = info({ isSessionActive: false, status: 66, current: 0 });
   station.commandDelay = 300;
-  const device = gladys.fake.devices[0];
-  const of = (role) => device.features.find((f) => f.external_id === feature(role));
-  const first = gladys.fake.setValue(device, of('start-charge'), 1);
-  const second = gladys.fake.setValue(device, of('set-max-current'), 20);
-  for (let i = 0; i < 20; i += 1) {
-    t.mock.timers.tick(100);
-    await settle();
-  }
+  const first = send(gladys, 'start-charge');
+  await settle();
+  const second = await send(gladys, 'set-max-current', 20);
+  assert.equal(second.success, false);
+  assert.match(second.error, /encore en cours/);
+  await run(t, 2000);
   assert.equal((await first).success, true);
-  assert.equal((await second).success, true);
-  const paths = server.requests.slice(-4).map((r) => r.path);
-  assert.deepEqual(paths, [
-    '/station/get/info',
-    '/station/control/start',
-    '/station/get/info',
-    '/station/control/partage',
+  assert.deepEqual(sent(server), ['GET /station/control/start']);
+});
+
+test('a stop waits for a quick command in flight, then goes once', async (t) => {
+  const { gladys, server, station } = await setup(t, { config: ALLOWED });
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  station.pathDelays = { '/station/control/start': 300 };
+  const start = send(gladys, 'start-charge');
+  await run(t, 100);
+  const stop = send(gladys, 'stop-charge');
+  await run(t, 3000);
+  assert.equal((await start).success, true);
+  const ack = await stop;
+  assert.equal(ack.success, true, ack.error);
+  assert.deepEqual(sent(server), ['GET /station/control/start', 'GET /station/control/stop']);
+});
+
+test('a stop is never blocked by a slow start: it goes, and again after it', async (t) => {
+  const { gladys, server, station } = await setup(t, { config: ALLOWED });
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  // The start answers after 4 s; the station applies it only then.
+  station.pathDelays = { '/station/control/start': 4000 };
+  const start = send(gladys, 'start-charge');
+  await run(t, 500);
+  const stop = send(gladys, 'stop-charge');
+  await run(t, 3500);
+  const ack = await stop;
+  assert.equal(ack.success, true, ack.error);
+  assert.deepEqual(sent(server), ['GET /station/control/start', 'GET /station/control/stop']);
+  await run(t, 1000);
+  assert.equal((await start).success, true);
+  await run(t, 500);
+  assert.deepEqual(sent(server), [
+    'GET /station/control/start',
+    'GET /station/control/stop',
+    'GET /station/control/stop',
   ]);
+});
+
+test('a start whose read is under way gives way to a stop', async (t) => {
+  const { gladys, server, station } = await setup(t, { config: ALLOWED });
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  station.readDelay = 800;
+  const start = send(gladys, 'start-charge');
+  await run(t, 200);
+  const stop = send(gladys, 'stop-charge');
+  await run(t, 4000);
+  const refused = await start;
+  assert.equal(refused.success, false);
+  assert.match(refused.error, /arrêt de cette borne est arrivé/);
+  assert.equal((await stop).success, true);
+  assert.deepEqual(sent(server), [], 'stopped already, the start never left');
+});
+
+test('an error before the transport is "not sent"', async (t) => {
+  const { app, press } = await setup(t, { config: ALLOWED });
+  app.client.command = async () => {
+    throw Object.assign(new Error('boom'), { notSent: true });
+  };
+  const ack = await press('stop-charge');
+  assert.match(ack.error, /commande non envoyée/);
+  app.client.command = async () => {
+    throw new Error('boom');
+  };
+  const other = await press('stop-charge');
+  assert.match(other.error, /envoyée, sans confirmation/);
+});
+
+test('a fresh read without a MAC refuses the command', async (t) => {
+  const { server, press, station } = await setup(t, { config: ALLOWED });
+  station.info.id = 'nope';
+  const ack = await press('stop-charge');
+  assert.equal(ack.success, false);
+  assert.match(ack.error, /n'a pas donné/);
+  assert.deepEqual(sent(server), []);
+});
+
+test('a 429 pause never reads sooner than the interval', async (t) => {
+  const server = fakeStations();
+  const { advance, station } = await setup(t, {
+    server,
+    config: { addresses: HOST, poll_interval: 600 },
+  });
+  station.readStatus = 429;
+  station.headers = { 'retry-after': '60' };
+  await advance(600 * SECOND, 10 * SECOND);
+  const reads = server.reads().length;
+  station.readStatus = undefined;
+  await advance(599 * SECOND, 10 * SECOND);
+  assert.equal(server.reads().length, reads, 'no read before 600 s');
+  await advance(2 * SECOND);
+  assert.equal(server.reads().length, reads + 1);
+});
+
+test('a created device no station gives any more: unreachable, and said so', async (t) => {
+  const { gladys } = await setup(t);
+  assert.equal(last(gladys, 'status'), 'En charge');
+  // The address is removed from the configuration.
+  await gladys.fake.configUpdated({ addresses: '' });
+  await settle();
+  assert.equal(last(gladys, 'status'), 'Borne injoignable');
+  assert.equal(last(gladys, 'connector-status'), CONNECTOR_STATUS.UNAVAILABLE);
+  assert.equal(gladys.fake.transports.at(-1).transport, DEVICE_TRANSPORTS.UNREACHABLE);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.match(message(gladys).fr, /Plus lue : Garage \(a1b2c3d4e5f6\)/);
+});
+
+test('a station never answering since the start: its created device is unreachable', async (t) => {
+  const server = fakeStations({ [HOST]: { info: info(), down: true } });
+  const gladys = createFakeGladys({ config: CONFIG, devices: [] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW });
+  // The device was created before (another run): Gladys serves it.
+  gladys.fake.devices = [
+    {
+      name: 'Garage',
+      external_id: DEVICE,
+      features: [{ external_id: feature('status') }, { external_id: feature('connector-status') }],
+    },
+  ];
+  const app = new TechnoveApp({
+    gladys,
+    logger: recorder([]),
+    transport: server.transport,
+    now: () => Date.now(),
+    store: memoryStore(),
+  });
+  registerHandlers(gladys, app);
+  t.after(() => app.stop());
+  await gladys.connect();
+  await settle();
+  t.mock.timers.tick(SECOND);
+  await settle();
+  assert.equal(last(gladys, 'status'), 'Borne injoignable');
+  assert.equal(last(gladys, 'connector-status'), CONNECTOR_STATUS.UNAVAILABLE);
+  assert.equal(gladys.fake.transports.at(-1).transport, DEVICE_TRANSPORTS.UNREACHABLE);
+  assert.match(message(gladys).en, /Not read any more: Garage/);
+});
+
+test('one MAC on two addresses: the address online wins', async (t) => {
+  const server = fakeStations({
+    [HOST]: { info: info({ name: 'First' }) },
+    '192.168.1.51': { info: info({ name: 'Second' }) },
+  });
+  const { gladys, advance } = await setup(t, {
+    server,
+    config: { addresses: `${HOST}, 192.168.1.51` },
+  });
+  assert.equal(deviceOf(gladys).name, 'First');
+  server.stations[HOST].down = true;
+  await advance(30 * SECOND);
+  assert.equal(gladys.fake.discoveredDevices.length, 1);
+  assert.equal(deviceOf(gladys).name, 'Second');
+  assert.equal(last(gladys, 'status'), 'En charge');
+  assert.equal(gladys.fake.transports.at(-1).transport, DEVICE_TRANSPORTS.LOCAL);
+});
+
+test('values outside the bounds of their feature are dropped', async (t) => {
+  const server = fakeStations({
+    [HOST]: {
+      info: info({ current: 500, voltageIn: 9999, energySession: -1, maxCurrent: 120 }),
+    },
+  });
+  const { gladys } = await setup(t, { server });
+  for (const role of ['current', 'voltage-in', 'session-energy', 'max-current', 'power']) {
+    assert.equal(last(gladys, role), undefined, role);
+  }
+  assert.equal(last(gladys, 'voltage-out'), 238);
+});
+
+test('an unknown rating offers 8 to 32 A only, and refuses the command', async (t) => {
+  const server = fakeStations({ [HOST]: { info: info({ maxStationCurrent: undefined }) } });
+  const { gladys, press } = await setup(t, { server, config: ALLOWED });
+  const select = deviceOf(gladys).features.find(
+    (f) => f.external_id === feature('set-max-current'),
+  );
+  assert.equal(select.supported_options.at(-1).value, '32');
+  const ack = await press('set-max-current', 16);
+  assert.match(ack.error, /courant nominal/);
 });
 
 test('a 429: every path pauses, kept across a reconnection and in /data', async (t) => {
@@ -567,7 +751,7 @@ test('two stations (load sharing): two devices; an invalid address is reported',
       ['ext:test-integration:technove:112233445566', 'Borne TechnoVE 5566'],
     ],
   );
-  assert.match(message(gladys).fr, /Adresse non comprise, ignorée : bad_host, 300\.1\.1\.1\./);
+  assert.match(message(gladys).fr, /Adresse ignorée : bad_host, 300\.1\.1\.1\./);
   assert.equal(gladys.fake.connectionStatus.connected, true);
 });
 

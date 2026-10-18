@@ -24,5 +24,13 @@ the notes of the version's GitHub Release.
   each command reads the station first and is answered within Gladys' 5 s.
 - Reads every 30 s (configurable); failures retried after 30 s to 5 minutes;
   a 429 pauses every path, kept in `/data`.
+- A created device that no configured station gives any more (address
+  removed, or no answer since the start) shows "Station unreachable", its
+  connector unavailable and an unreachable badge; the status names it.
+- A stop is never blocked by a command in flight; any other command is
+  refused at once while one runs.
+- A 429 pause is never shorter than the refresh interval; a fifth address is
+  reported ("four at most") instead of being dropped silently; readings
+  outside the bounds of their feature are not published.
 - "Test the connection" button; documentation in English and French;
   `LICENSE` and `THIRD_PARTY_NOTICES.md` shipped in the image.
