@@ -87,8 +87,9 @@ export function fakeStations(stations = { [HOST]: { info: info() } }) {
         }
         return answer(200, station.body ?? station.info);
       }
-      if (station.commandStatus) {
-        return answer(station.commandStatus, 'error', station.headers);
+      const status = station.pathStatus?.[path] ?? station.commandStatus;
+      if (status) {
+        return answer(status, 'error', station.headers);
       }
       if (station.applies !== false) {
         if (path === '/station/control/start') {

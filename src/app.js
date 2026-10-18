@@ -66,6 +66,8 @@ export class TechnoveApp {
     this.lastTestAt = -Infinity;
     /** mac -> the command in flight: { role, overtaken, promise } (one at a time, a stop aside). */
     this.inFlight = new Map();
+    /** mac -> number of commands that arrived (a newer one cancels a stop sent again). */
+    this.commandCount = new Map();
     /** `${mac}:${kind}` -> { from, expected, moved, until }: a command sent, not seen yet. */
     this.guards = new Map();
   }
@@ -325,7 +327,7 @@ export class TechnoveApp {
 
   /** The connection status of the configuration screen, from every station. */
   async updateStatus() {
-    const [connected, message] = this.status();
+    const [connected, message, plain] = this.status();
     const orphans = this.orphans();
     if (orphans.length === 0) {
       await this.setStatus(connected, message);
@@ -341,10 +343,14 @@ export class TechnoveApp {
           : mac;
       })
       .join(', ');
-    await this.setStatus(false, join(message, T.orphans(names)));
+    // Not connected: the message never starts with "Connected".
+    await this.setStatus(false, join(plain ?? message, T.orphans(names)));
   }
 
-  /** `[connected, message]` from the configured stations. */
+  /**
+   * `[connected, message, plain]` from the configured stations; `plain`:
+   * the same summary without "Connected", for a status shown as not connected.
+   */
   status() {
     const stations = [...this.stations.values()];
     if (stations.length === 0) {
@@ -375,7 +381,7 @@ export class TechnoveApp {
       summaries.map((m) => m.en).join(' '),
       summaries.map((m) => m.fr).join(' '),
     );
-    return [true, this.withInvalid(T.connected(summary))];
+    return [true, this.withInvalid(T.connected(summary)), this.withInvalid(summary)];
   }
 
   // --- Gladys ----------------------------------------------------------------
@@ -621,11 +627,19 @@ export class TechnoveApp {
     // One command at a time per station: a busy station refuses at once.
     // A stop is never blocked by the queue: it waits for the command in
     // flight only as long as its own deadline allows, then goes anyway.
+    // Counted even when refused just below: a newer command cancels a stop sent again.
+    const seq = this.arrived(mac);
     const previous = this.inFlight.get(mac);
     if (previous && (role !== FEATURES.STOP || previous.role === FEATURES.STOP)) {
       throw this.refusal(ERRORS.stillRunning);
     }
-    const entry = { role, overtaken: undefined, promise: undefined };
+    const entry = {
+      role,
+      seq,
+      overtaken: undefined,
+      again: undefined,
+      promise: undefined,
+    };
     this.inFlight.set(mac, entry);
     entry.promise = (async () => {
       if (previous) {
@@ -643,13 +657,29 @@ export class TechnoveApp {
       }
       return this.command(target, wanted, received, entry);
     })();
-    try {
-      return await entry.promise;
-    } finally {
+    const release = () => {
       if (this.inFlight.get(mac) === entry) {
         this.inFlight.delete(mac);
       }
+    };
+    try {
+      return await entry.promise;
+    } finally {
+      // A stop to send again keeps the station busy until it is done (the
+      // ack does not wait for it): a newer start is refused meanwhile.
+      if (entry.again) {
+        entry.again.finally(release);
+      } else {
+        release();
+      }
     }
+  }
+
+  /** Counts a command arriving for a station; returns its number. */
+  arrived(mac) {
+    const seq = (this.commandCount.get(mac) ?? 0) + 1;
+    this.commandCount.set(mac, seq);
+    return seq;
   }
 
   /** Whether `promise` settles within `ms` (it goes on either way). */
@@ -840,10 +870,20 @@ export class TechnoveApp {
       return;
     }
     const generation = this.generation;
-    entry.overtaken
+    // Kept in entry.again: the stop holds the station (inFlight) until it ends.
+    entry.again = entry.overtaken
       .catch(() => {})
       .then(async () => {
         if (generation !== this.generation || !this.config.allowCommands) {
+          return;
+        }
+        if ((this.commandCount.get(mac) ?? 0) !== entry.seq) {
+          // A newer command arrived since this stop: its intent wins.
+          this.logger.info(`TechnoVE ${station.key}: stop not sent again (newer command)`);
+          return;
+        }
+        if (this.paused) {
+          this.logger.info(`TechnoVE ${station.key}: stop not sent again (paused after a 429)`);
           return;
         }
         this.logger.warn(`TechnoVE ${station.key}: stop sent again after the command in flight`);
@@ -853,9 +893,14 @@ export class TechnoveApp {
         });
         this.guard(mac, plan);
       })
-      .catch((err) =>
-        this.logger.warn(`TechnoVE ${station.key}: stop again failed (${errorReason(err)})`),
-      );
+      .catch(async (err) => {
+        this.logger.warn(`TechnoVE ${station.key}: stop again failed (${errorReason(err)})`);
+        if (err.kind === ERROR_KINDS.RATE_LIMITED) {
+          await this.pause(err);
+          await this.updateStatus();
+        }
+      })
+      .catch(() => {});
   }
 
   /** Spaced reads after a command: its effect, then a check. */

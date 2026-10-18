@@ -29,6 +29,10 @@ the notes of the version's GitHub Release.
   connector unavailable and an unreachable badge; the status names it.
 - A stop is never blocked by a command in flight; any other command is
   refused at once while one runs.
+- A stop sent again after a command in flight keeps the station busy until
+  it is done (a newer start is refused meanwhile); it is cancelled by a newer
+  command, never sent during a 429 pause, and its own 429 pauses every path.
+  With a station no longer read, the status never starts with "Connected".
 - A 429 pause is never shorter than the refresh interval; a fifth address is
   reported ("four at most") instead of being dropped silently; readings
   outside the bounds of their feature are not published.

@@ -530,6 +530,81 @@ test('a stop is never blocked by a slow start: it goes, and again after it', asy
   ]);
 });
 
+test('a stop to send again holds the station; a newer command cancels it', async (t) => {
+  const { gladys, server, station } = await setup(t, { config: ALLOWED });
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  station.pathDelays = { '/station/control/start': 4100 };
+  const start = send(gladys, 'start-charge');
+  await run(t, 500);
+  const stop = send(gladys, 'stop-charge');
+  await run(t, 3000);
+  assert.equal((await stop).success, true);
+  // The stop still waits to be sent again: a newer start is refused...
+  const newer = await send(gladys, 'start-charge');
+  assert.equal(newer.success, false);
+  assert.match(newer.error, /encore en cours/);
+  await run(t, 3000);
+  const started = await start;
+  assert.equal(started.success, true, started.error);
+  // ...and, being newer, cancels the stop sent again.
+  assert.deepEqual(sent(server), ['GET /station/control/start', 'GET /station/control/stop']);
+  // Released once the stop is done: a start goes again.
+  station.pathDelays = {};
+  station.info.isSessionActive = false;
+  const later = send(gladys, 'start-charge');
+  await run(t, 2000);
+  assert.equal((await later).success, true, (await later).error);
+  assert.equal(sent(server).at(-1), 'GET /station/control/start');
+});
+
+test('a stop sent again: never during a pause, and a 429 pauses', async (t) => {
+  const store = memoryStore();
+  const { gladys, app, server, station } = await setup(t, { config: ALLOWED, store });
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  station.pathDelays = { '/station/control/start': 4100 };
+  // The stop sent again answers 429.
+  let start = send(gladys, 'start-charge');
+  await run(t, 500);
+  let stop = send(gladys, 'stop-charge');
+  await run(t, 3000);
+  assert.equal((await stop).success, true);
+  station.pathStatus = { '/station/control/stop': 429 };
+  station.headers = { 'retry-after': '120' };
+  await run(t, 3000);
+  await start;
+  assert.equal(sent(server).filter((s) => s.endsWith('stop')).length, 2);
+  assert.ok(app.paused, 'the 429 of the stop sent again pauses');
+  assert.ok(store.data.pause.until > Date.now());
+  // During a pause, nothing is sent again.
+  station.pathStatus = {};
+  app.pausedUntil = 0;
+  station.info = info({ isSessionActive: false, status: 66, current: 0 });
+  start = send(gladys, 'start-charge');
+  await run(t, 500);
+  stop = send(gladys, 'stop-charge');
+  await run(t, 3000);
+  assert.equal((await stop).success, true);
+  app.pausedUntil = Date.now() + 10 * MINUTE;
+  const count = server.commands().length;
+  await run(t, 3000);
+  await start;
+  assert.equal(server.commands().length, count, 'nothing sent again during the pause');
+});
+
+test('with an orphan, a status shown as not connected never says "Connected"', async (t) => {
+  const { gladys, advance } = await setup(t);
+  await gladys.fake.deviceCreated({
+    name: 'Old',
+    external_id: 'ext:test-integration:technove:ffffffffffff',
+    features: [],
+  });
+  await advance(30 * SECOND);
+  assert.equal(gladys.fake.connectionStatus.connected, false);
+  assert.doesNotMatch(message(gladys).fr, /^Connecté/);
+  assert.doesNotMatch(message(gladys).en, /^Connected/);
+  assert.match(message(gladys).fr, /^Garage : En charge.*Plus lue : Old \(ffffffffffff\)/);
+});
+
 test('a start whose read is under way gives way to a stop', async (t) => {
   const { gladys, server, station } = await setup(t, { config: ALLOWED });
   station.info = info({ isSessionActive: false, status: 66, current: 0 });
