@@ -1,6 +1,6 @@
 {
   "name": "gladys-technove",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Gladys Assistant external integration for TechnoVE EV charging stations (status, power, current, voltage, session energy, maximum current; optional start, stop and maximum current), over their local API. Unofficial, not affiliated with TechnoVE.",
   "type": "module",
